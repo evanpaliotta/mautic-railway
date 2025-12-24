@@ -1,5 +1,5 @@
 # Custom Mautic Dockerfile that fixes Apache MPM configuration
-FROM mautic/mautic:v5-apache
+FROM mautic/mautic:5-apache
 
 # Fix the Apache MPM configuration error
 # Disable conflicting MPM modules and ensure only one is loaded
