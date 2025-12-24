@@ -12,13 +12,18 @@ RUN a2dismod mpm_event 2>/dev/null || true && \
 # Ensure PHP mod is enabled for prefork
 RUN a2enmod php || a2enmod php8.1 || a2enmod php8.2 || echo "PHP module already enabled"
 
-# Install API-based mailer bridges as www-data user (Mautic's expected user)
-# This prevents permission and path resolution issues
+# Create composer cache directory for www-data user
+RUN mkdir -p /var/www/.composer/cache && \
+    chown -R www-data:www-data /var/www/.composer
+
+# Install API-based mailer bridges as www-data user
 USER www-data
 WORKDIR /var/www/html
 
+# Set composer home to use the cache directory we created
+ENV COMPOSER_HOME=/var/www/.composer
+
 # Install the Amazon SES and SendGrid mailers
-# Using --no-scripts initially to avoid permission issues, then running dump-autoload
 RUN composer require symfony/amazon-mailer symfony/sendgrid-mailer \
     --no-interaction \
     --no-scripts \
@@ -37,7 +42,7 @@ RUN rm -rf /var/www/html/var/cache/* && \
     mkdir -p /var/www/html/var/cache /var/www/html/var/logs && \
     chown -R www-data:www-data /var/www/html/var
 
-# Create a script to warm up caches on container start (optional)
+# Create a script to warm up caches on container start
 RUN echo '#!/bin/bash\nphp /var/www/html/bin/console cache:clear --env=prod 2>/dev/null || true\nexec apache2-foreground' > /usr/local/bin/mautic-start.sh && \
     chmod +x /usr/local/bin/mautic-start.sh
 
