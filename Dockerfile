@@ -12,4 +12,5 @@ RUN a2dismod mpm_event 2>/dev/null || true && \
 RUN a2enmod php || a2enmod php8.1 || a2enmod php8.2 || echo "PHP module already enabled"
 
 # Install Amazon SES mailer bridge for API-based email sending (bypasses SMTP port blocking)
-RUN cd /var/www/html && composer require symfony/amazon-mailer --no-interaction
+# Using --no-scripts to avoid triggering Mautic's asset generation which fails as root
+RUN cd /var/www/html && composer require symfony/amazon-mailer --no-interaction --no-scripts
