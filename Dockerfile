@@ -11,6 +11,6 @@ RUN a2dismod mpm_event 2>/dev/null || true && \
 # Ensure PHP mod is enabled for prefork
 RUN a2enmod php || a2enmod php8.1 || a2enmod php8.2 || echo "PHP module already enabled"
 
-# Install Amazon SES mailer bridge for API-based email sending (bypasses SMTP port blocking)
+# Install API-based mailer bridges for email sending (bypasses Railway's SMTP port blocking)
 # Using --no-scripts to avoid triggering Mautic's asset generation which fails as root
-RUN cd /var/www/html && composer require symfony/amazon-mailer --no-interaction --no-scripts
+RUN cd /var/www/html && composer require symfony/amazon-mailer symfony/sendgrid-mailer --no-interaction --no-scripts
