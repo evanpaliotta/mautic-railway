@@ -13,4 +13,7 @@ RUN a2enmod php || a2enmod php8.1 || a2enmod php8.2 || echo "PHP module already 
 
 # Install API-based mailer bridges for email sending (bypasses Railway's SMTP port blocking)
 # Using --no-scripts to avoid triggering Mautic's asset generation which fails as root
-RUN cd /var/www/html && composer require symfony/amazon-mailer symfony/sendgrid-mailer --no-interaction --no-scripts
+# Then regenerate autoloader to ensure new packages are discoverable
+RUN cd /var/www/html && \
+    composer require symfony/amazon-mailer symfony/sendgrid-mailer --no-interaction --no-scripts && \
+    composer dump-autoload --optimize
