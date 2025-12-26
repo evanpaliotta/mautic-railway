@@ -42,9 +42,76 @@ RUN rm -rf /var/www/html/var/cache/* && \
     mkdir -p /var/www/html/var/cache /var/www/html/var/logs && \
     chown -R www-data:www-data /var/www/html/var
 
-# Create a script to warm up caches on container start
-RUN echo '#!/bin/bash\nphp /var/www/html/bin/console cache:clear --env=prod 2>/dev/null || true\nexec apache2-foreground' > /usr/local/bin/mautic-start.sh && \
-    chmod +x /usr/local/bin/mautic-start.sh
+# Install cron and supervisor for background jobs
+RUN apt-get update && apt-get install -y cron supervisor && rm -rf /var/lib/apt/lists/*
+
+# Create Mautic cron script that runs all required jobs
+RUN cat > /usr/local/bin/mautic-cron.sh << 'CRONSCRIPT'
+#!/bin/bash
+# Mautic Cron Jobs - runs every 2 minutes
+while true; do
+    echo "[$(date)] Running Mautic cron jobs..."
+
+    # Update segment memberships
+    php /var/www/html/bin/console mautic:segments:update --env=prod 2>&1
+
+    # Update campaign memberships
+    php /var/www/html/bin/console mautic:campaigns:update --env=prod 2>&1
+
+    # Trigger scheduled campaign events (send emails)
+    php /var/www/html/bin/console mautic:campaigns:trigger --env=prod 2>&1
+
+    # Process email queue
+    php /var/www/html/bin/console mautic:emails:send --env=prod 2>&1
+
+    # Broadcast scheduled emails
+    php /var/www/html/bin/console mautic:broadcasts:send --env=prod 2>&1
+
+    echo "[$(date)] Cron jobs complete. Sleeping 2 minutes..."
+    sleep 120
+done
+CRONSCRIPT
+RUN chmod +x /usr/local/bin/mautic-cron.sh
+
+# Create supervisor config to run both Apache and cron
+RUN cat > /etc/supervisor/conf.d/mautic.conf << 'SUPERVISORCONF'
+[supervisord]
+nodaemon=true
+logfile=/var/log/supervisor/supervisord.log
+pidfile=/var/run/supervisord.pid
+
+[program:apache2]
+command=/usr/sbin/apache2ctl -D FOREGROUND
+autostart=true
+autorestart=true
+stdout_logfile=/dev/stdout
+stdout_logfile_maxbytes=0
+stderr_logfile=/dev/stderr
+stderr_logfile_maxbytes=0
+
+[program:mautic-cron]
+command=/usr/local/bin/mautic-cron.sh
+autostart=true
+autorestart=true
+stdout_logfile=/dev/stdout
+stdout_logfile_maxbytes=0
+stderr_logfile=/dev/stderr
+stderr_logfile_maxbytes=0
+user=www-data
+SUPERVISORCONF
+
+# Create log directory for supervisor
+RUN mkdir -p /var/log/supervisor
+
+# Create startup script
+RUN cat > /usr/local/bin/mautic-start.sh << 'STARTSCRIPT'
+#!/bin/bash
+echo "Clearing Mautic cache..."
+php /var/www/html/bin/console cache:clear --env=prod 2>/dev/null || true
+echo "Starting Mautic with supervisor (Apache + Cron jobs)..."
+exec /usr/bin/supervisord -c /etc/supervisor/supervisord.conf
+STARTSCRIPT
+RUN chmod +x /usr/local/bin/mautic-start.sh
 
 # Use the custom start script
 CMD ["/usr/local/bin/mautic-start.sh"]
