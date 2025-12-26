@@ -42,37 +42,9 @@ RUN rm -rf /var/www/html/var/cache/* && \
     mkdir -p /var/www/html/var/cache /var/www/html/var/logs && \
     chown -R www-data:www-data /var/www/html/var
 
-# Create Mautic cron script that runs all required jobs
-RUN cat > /usr/local/bin/mautic-cron.sh << 'CRONSCRIPT'
-#!/bin/bash
-# Mautic Cron Jobs - runs every 2 minutes in background
-# Wait for Mautic to fully initialize
-sleep 120
-while true; do
-    echo "[$(date)] Running Mautic cron jobs..."
-    php /var/www/html/bin/console mautic:segments:update --env=prod 2>&1 || true
-    php /var/www/html/bin/console mautic:campaigns:update --env=prod 2>&1 || true
-    php /var/www/html/bin/console mautic:campaigns:trigger --env=prod 2>&1 || true
-    php /var/www/html/bin/console mautic:emails:send --env=prod 2>&1 || true
-    php /var/www/html/bin/console mautic:broadcasts:send --env=prod 2>&1 || true
-    echo "[$(date)] Cron jobs complete. Sleeping 2 minutes..."
-    sleep 120
-done
-CRONSCRIPT
-RUN chmod +x /usr/local/bin/mautic-cron.sh
-
-# Create a wrapper script that starts cron in background then runs Apache
-RUN cat > /usr/local/bin/mautic-start.sh << 'STARTSCRIPT'
-#!/bin/bash
-echo "Starting Mautic cron jobs in background..."
-nohup /usr/local/bin/mautic-cron.sh > /var/log/mautic-cron.log 2>&1 &
-echo "Starting Apache..."
-exec apache2-foreground
-STARTSCRIPT
-RUN chmod +x /usr/local/bin/mautic-start.sh
-
-# Create log file for cron
-RUN touch /var/log/mautic-cron.log && chown www-data:www-data /var/log/mautic-cron.log
+# Create a script to warm up caches on container start
+RUN echo '#!/bin/bash\nphp /var/www/html/bin/console cache:clear --env=prod 2>/dev/null || true\nexec apache2-foreground' > /usr/local/bin/mautic-start.sh && \
+    chmod +x /usr/local/bin/mautic-start.sh
 
 # Use the custom start script
 CMD ["/usr/local/bin/mautic-start.sh"]
