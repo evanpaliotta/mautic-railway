@@ -60,17 +60,17 @@ USER root
 # If Flex recipe didn't run, manually create the service config
 RUN if [ ! -f /var/www/html/config/packages/amazon_mailer.yaml ]; then \
     mkdir -p /var/www/html/config/packages && \
-    cat > /var/www/html/config/packages/amazon_mailer.yaml << 'EOF'
-services:
-    Symfony\Component\Mailer\Bridge\Amazon\Transport\SesTransportFactory:
-        tags:
-            - { name: mailer.transport_factory }
-
-    Symfony\Component\Mailer\Bridge\Sendgrid\Transport\SendgridTransportFactory:
-        tags:
-            - { name: mailer.transport_factory }
-EOF
-    chown www-data:www-data /var/www/html/config/packages/amazon_mailer.yaml; \
+    printf '%s\n' \
+        'services:' \
+        '    Symfony\Component\Mailer\Bridge\Amazon\Transport\SesTransportFactory:' \
+        '        tags:' \
+        '            - { name: mailer.transport_factory }' \
+        '' \
+        '    Symfony\Component\Mailer\Bridge\Sendgrid\Transport\SendgridTransportFactory:' \
+        '        tags:' \
+        '            - { name: mailer.transport_factory }' \
+        > /var/www/html/config/packages/amazon_mailer.yaml && \
+    chown www-data:www-data /var/www/html/config/packages/amazon_mailer.yaml && \
     echo "Created amazon_mailer.yaml manually"; \
     fi
 
