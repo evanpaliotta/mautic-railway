@@ -1,10 +1,10 @@
 # Custom Mautic Dockerfile with SES API mailer support
 # Fixes: Railway blocks SMTP ports, must use API-based email transport
-# Build: 2026-01-06-v6 - Run Symfony Flex recipe properly (fix npm permissions first)
+# Build: 2026-01-06-v7 - ALWAYS clear cache on startup to pick up env vars (MAILER_DSN)
 FROM mautic/mautic:5-apache
 
 # Cache-busting build arg to force fresh layers when needed
-ARG CACHE_BUST=2026-01-06-v6
+ARG CACHE_BUST=2026-01-06-v7-new-creds
 
 # Fix the Apache MPM configuration error
 RUN a2dismod mpm_event 2>/dev/null || true && \
@@ -100,19 +100,21 @@ RUN php -r 'require "/var/www/html/vendor/autoload.php"; \
 RUN echo "Checking container for mailer transports..." && \
     php /var/www/html/bin/console debug:container --tag=mailer.transport_factory --env=prod 2>&1 | head -20 || echo "Could not check container"
 
-# Create custom entrypoint that ensures cache is fresh at runtime
+# Create custom entrypoint that ALWAYS clears and rebuilds cache on startup
+# This ensures environment variables (MAILER_DSN) are picked up fresh
 RUN cat > /usr/local/bin/mautic-entrypoint.sh << 'ENTRYPOINT'
 #!/bin/bash
-echo "=== Mautic with SES API Transport (v6) ==="
+echo "=== Mautic with SES API Transport (v7) ==="
+echo "Clearing cache to pick up fresh environment variables..."
 
-# Check if cache needs rebuilding (first boot or volume mount)
-if [ ! -d /var/www/html/var/cache/prod ] || [ -z "$(ls -A /var/www/html/var/cache/prod 2>/dev/null)" ]; then
-    echo "Cache not found, warming up..."
-    rm -rf /var/www/html/var/cache/prod/* 2>/dev/null || true
-    chown -R www-data:www-data /var/www/html/var/cache
-    su -s /bin/bash www-data -c "php /var/www/html/bin/console cache:warmup --env=prod" 2>/dev/null || true
-    echo "Cache warmed up"
-fi
+# ALWAYS clear cache on startup to ensure env vars are fresh
+rm -rf /var/www/html/var/cache/prod/* 2>/dev/null || true
+chown -R www-data:www-data /var/www/html/var/cache
+
+echo "Warming up cache..."
+su -s /bin/bash www-data -c "php /var/www/html/bin/console cache:clear --env=prod --no-warmup" 2>/dev/null || true
+su -s /bin/bash www-data -c "php /var/www/html/bin/console cache:warmup --env=prod" 2>/dev/null || true
+echo "Cache rebuilt with current MAILER_DSN"
 
 exec /docker-entrypoint.sh "$@"
 ENTRYPOINT
