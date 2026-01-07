@@ -1,10 +1,13 @@
 # Custom Mautic Dockerfile with SES API mailer support
 # Fixes: Railway blocks SMTP ports, must use API-based email transport
-# Build: 2026-01-06-v11 - Use mautic:config:set console command
+# Build: 2026-01-06-v12 - Hardcode correct MAILER_DSN in build
 FROM mautic/mautic:5-apache
 
 # Cache-busting build arg to force fresh layers when needed
-ARG CACHE_BUST=2026-01-06-v11-console
+ARG CACHE_BUST=2026-01-06-v12-hardcode
+
+# Build-time argument for MAILER_DSN (will be injected by Railway)
+ARG MAILER_DSN_BUILD="ses+api://AKIATQN6XWF5FFHZFGN4:iGgjtUac0E6Q%2FLlh1jDKeu3iwBAmHEw8gyytjTEH@default?region=us-east-2"
 
 # Fix the Apache MPM configuration error
 RUN a2dismod mpm_event 2>/dev/null || true && \
@@ -79,6 +82,24 @@ RUN chown -R www-data:www-data /var/www/html/config && \
     chown -R www-data:www-data /var/www/html/var && \
     chown -R www-data:www-data /var/www/html/vendor
 
+# CRITICAL: Inject MAILER_DSN into local.php at BUILD TIME
+# This ensures the correct credentials are baked into the image
+ARG MAILER_DSN_BUILD
+RUN echo "Injecting MAILER_DSN into local.php at build time..." && \
+    if [ -f /var/www/html/config/local.php ]; then \
+        php -r " \
+            \$config = include '/var/www/html/config/local.php'; \
+            \$config['mailer_dsn'] = '${MAILER_DSN_BUILD}'; \
+            file_put_contents('/var/www/html/config/local.php', '<?php return ' . var_export(\$config, true) . ';'); \
+            echo 'Updated local.php with new mailer_dsn\n'; \
+        "; \
+    else \
+        echo '<?php return array(\"mailer_dsn\" => \"'${MAILER_DSN_BUILD}'\");' > /var/www/html/config/local.php; \
+        echo 'Created new local.php with mailer_dsn'; \
+    fi && \
+    chown www-data:www-data /var/www/html/config/local.php && \
+    cat /var/www/html/config/local.php | head -5
+
 # Clear cache and rebuild container as www-data
 USER www-data
 
@@ -100,83 +121,27 @@ RUN php -r 'require "/var/www/html/vendor/autoload.php"; \
 RUN echo "Checking container for mailer transports..." && \
     php /var/www/html/bin/console debug:container --tag=mailer.transport_factory --env=prod 2>&1 | head -20 || echo "Could not check container"
 
-# Create PHP script that injects MAILER_DSN directly into local.php config
-RUN cat > /usr/local/bin/inject-mailer-dsn.php << 'PHPSCRIPT'
-<?php
-// Inject MAILER_DSN from environment into Mautic's local.php config
-$mailerDsn = getenv('MAILER_DSN');
-if (!$mailerDsn) {
-    echo "No MAILER_DSN set, skipping\n";
-    exit(0);
-}
-
-$configFile = '/var/www/html/config/local.php';
-echo "Injecting MAILER_DSN into $configFile\n";
-echo "DSN: " . preg_replace('/:[^:@]+@/', ':***@', $mailerDsn) . "\n";
-
-if (!file_exists($configFile)) {
-    echo "Config file not found, creating new one\n";
-    $config = [];
-} else {
-    $config = include $configFile;
-    if (!is_array($config)) {
-        $config = [];
-    }
-}
-
-// Set mailer_dsn to use the environment variable value
-$config['mailer_dsn'] = $mailerDsn;
-
-// Write back the config
-$content = "<?php\nreturn " . var_export($config, true) . ";\n";
-if (file_put_contents($configFile, $content)) {
-    echo "Successfully wrote MAILER_DSN to local.php\n";
-    chmod($configFile, 0666);
-} else {
-    echo "Failed to write config file\n";
-}
-PHPSCRIPT
-
-# Create custom entrypoint that uses Mautic console to set MAILER_DSN
+# Create custom entrypoint that clears cache on startup
 RUN cat > /usr/local/bin/mautic-entrypoint.sh << 'ENTRYPOINT'
 #!/bin/bash
-echo "=== Mautic with SES API Transport (v11) ==="
+echo "=== Mautic with SES API Transport (v12) ==="
+echo "MAILER_DSN is baked into image at build time"
 
-# Make config and var directories writable
-mkdir -p /var/www/html/config /var/www/html/var/cache /var/www/html/var/logs
-chmod -R 777 /var/www/html/config /var/www/html/var 2>/dev/null || true
-chown -R www-data:www-data /var/www/html/config /var/www/html/var
-
-# Clear all caches first
-echo "Clearing all caches..."
+# Clear all caches on startup to ensure fresh config
+echo "Clearing caches..."
 rm -rf /var/www/html/var/cache/* 2>/dev/null || true
-
-# Use Mautic console to set mailer_dsn from environment
-if [ -n "$MAILER_DSN" ]; then
-    echo "Setting MAILER_DSN via Mautic console..."
-    echo "DSN: $(echo $MAILER_DSN | sed 's/:.*@/:***@/')"
-
-    # Try to set the config via console command
-    su -s /bin/bash www-data -c "php /var/www/html/bin/console mautic:config:set mailer_dsn '$MAILER_DSN'" 2>&1 || echo "Config set via console failed, trying alternative..."
-
-    # Alternative: directly update local.php if it exists and is writable
-    if [ -w /var/www/html/config/local.php ]; then
-        echo "Updating local.php directly..."
-        php /usr/local/bin/inject-mailer-dsn.php
-    fi
-fi
+chown -R www-data:www-data /var/www/html/var/cache
 
 # Warm up cache
 echo "Warming up cache..."
 su -s /bin/bash www-data -c "php /var/www/html/bin/console cache:clear --env=prod --no-warmup" 2>/dev/null || true
 su -s /bin/bash www-data -c "php /var/www/html/bin/console cache:warmup --env=prod" 2>/dev/null || true
 
-echo "Startup complete. MAILER_DSN should now be active."
+echo "Startup complete."
 exec /docker-entrypoint.sh "$@"
 ENTRYPOINT
 
-RUN chmod +x /usr/local/bin/mautic-entrypoint.sh && \
-    chmod +x /usr/local/bin/inject-mailer-dsn.php
+RUN chmod +x /usr/local/bin/mautic-entrypoint.sh
 
 ENTRYPOINT ["/usr/local/bin/mautic-entrypoint.sh"]
 CMD ["apache2-foreground"]
