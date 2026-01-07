@@ -1,6 +1,6 @@
 # Custom Mautic Dockerfile with SES API mailer support
 # Fixes: Railway blocks SMTP ports, must use API-based email transport
-# Build: 2026-01-06-v16 - Force update local.php and clear ALL caches
+# Build: 2026-01-07-v17 - Fix build failure when local.php doesn't exist
 FROM mautic/mautic:5-apache
 
 # Cache-busting build arg
@@ -77,6 +77,7 @@ RUN chown www-data:www-data /var/www/html/config/packages/mailer_transports.yaml
 
 # CRITICAL: Remove any hardcoded mailer_dsn from local.php
 # This forces Mautic to use the MAILER_DSN environment variable
+# Note: local.php may not exist during build - it gets created at runtime
 RUN if [ -f /var/www/html/config/local.php ]; then \
     echo "Removing mailer_dsn from local.php to use env var..." && \
     php -r " \
@@ -84,9 +85,9 @@ RUN if [ -f /var/www/html/config/local.php ]; then \
         unset(\$config['mailer_dsn']); \
         file_put_contents('/var/www/html/config/local.php', '<?php return ' . var_export(\$config, true) . ';'); \
         echo 'Removed mailer_dsn from local.php\n'; \
-    "; \
-    fi && \
-    chown www-data:www-data /var/www/html/config/local.php
+    " && \
+    chown www-data:www-data /var/www/html/config/local.php; \
+    fi
 
 # Set proper ownership
 RUN chown -R www-data:www-data /var/www/html/config && \
