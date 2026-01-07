@@ -24,9 +24,9 @@ WORKDIR /var/www/html
 ENV COMPOSER_HOME=/var/www/.composer
 
 # Install the Amazon SES and SendGrid mailers
+# REBUILD: v2 - Remove --no-scripts to allow proper package setup
 RUN composer require symfony/amazon-mailer symfony/sendgrid-mailer \
     --no-interaction \
-    --no-scripts \
     --prefer-dist \
     --optimize-autoloader
 
