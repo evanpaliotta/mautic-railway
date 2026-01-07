@@ -1,10 +1,10 @@
 # Custom Mautic Dockerfile with SES API mailer support
 # Fixes: Railway blocks SMTP ports, must use API-based email transport
-# Build: 2026-01-06-v9 - Inject MAILER_DSN into database on startup
+# Build: 2026-01-06-v10 - Inject MAILER_DSN into local.php config file
 FROM mautic/mautic:5-apache
 
 # Cache-busting build arg to force fresh layers when needed
-ARG CACHE_BUST=2026-01-06-v9-db-inject
+ARG CACHE_BUST=2026-01-06-v10-localphp
 
 # Fix the Apache MPM configuration error
 RUN a2dismod mpm_event 2>/dev/null || true && \
@@ -100,112 +100,74 @@ RUN php -r 'require "/var/www/html/vendor/autoload.php"; \
 RUN echo "Checking container for mailer transports..." && \
     php /var/www/html/bin/console debug:container --tag=mailer.transport_factory --env=prod 2>&1 | head -20 || echo "Could not check container"
 
-# Create PHP script that updates MAILER_DSN in database
-RUN cat > /usr/local/bin/update-mailer-dsn.php << 'PHPSCRIPT'
+# Create PHP script that injects MAILER_DSN directly into local.php config
+RUN cat > /usr/local/bin/inject-mailer-dsn.php << 'PHPSCRIPT'
 <?php
-// Update Mautic email configuration from MAILER_DSN environment variable
+// Inject MAILER_DSN from environment into Mautic's local.php config
 $mailerDsn = getenv('MAILER_DSN');
 if (!$mailerDsn) {
-    echo "No MAILER_DSN set, skipping database update\n";
+    echo "No MAILER_DSN set, skipping\n";
     exit(0);
 }
 
-echo "Parsing MAILER_DSN: " . preg_replace('/:[^:@]+@/', ':***@', $mailerDsn) . "\n";
+$configFile = '/var/www/html/config/local.php';
+echo "Injecting MAILER_DSN into $configFile\n";
+echo "DSN: " . preg_replace('/:[^:@]+@/', ':***@', $mailerDsn) . "\n";
 
-// Parse the DSN
-if (preg_match('/^([a-z+]+):\/\/([^:]+):([^@]+)@([^?]+)\??(.*)$/', $mailerDsn, $matches)) {
-    $scheme = $matches[1];
-    $user = $matches[2];
-    $pass = urldecode($matches[3]);
-    $host = $matches[4];
-    parse_str($matches[5] ?? '', $options);
-
-    echo "Scheme: $scheme, Host: $host, User: $user\n";
-
-    // Load Mautic's database config
-    $localConfig = '/var/www/html/config/local.php';
-    if (file_exists($localConfig)) {
-        $config = include $localConfig;
-        $dbHost = $config['db_host'] ?? getenv('MAUTIC_DB_HOST');
-        $dbName = $config['db_name'] ?? getenv('MAUTIC_DB_NAME');
-        $dbUser = $config['db_user'] ?? getenv('MAUTIC_DB_USER');
-        $dbPass = $config['db_password'] ?? getenv('MAUTIC_DB_PASSWORD');
-        $dbPort = $config['db_port'] ?? getenv('MAUTIC_DB_PORT') ?: 3306;
-    } else {
-        $dbHost = getenv('MAUTIC_DB_HOST');
-        $dbName = getenv('MAUTIC_DB_NAME');
-        $dbUser = getenv('MAUTIC_DB_USER');
-        $dbPass = getenv('MAUTIC_DB_PASSWORD');
-        $dbPort = getenv('MAUTIC_DB_PORT') ?: 3306;
-    }
-
-    if (!$dbHost || !$dbName) {
-        echo "Database config not found, skipping\n";
-        exit(0);
-    }
-
-    try {
-        $pdo = new PDO("mysql:host=$dbHost;port=$dbPort;dbname=$dbName", $dbUser, $dbPass);
-        $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
-
-        // Build the new DSN for storage
-        $newDsn = $mailerDsn;
-
-        // Check if there's existing config to update
-        $stmt = $pdo->query("SELECT id FROM mautic_configurations WHERE id = 1");
-        if ($stmt->fetch()) {
-            // Update - set the mailer_dsn in the bundle_config JSON
-            $stmt = $pdo->query("SELECT bundle_config FROM mautic_configurations WHERE id = 1");
-            $row = $stmt->fetch(PDO::FETCH_ASSOC);
-            $bundleConfig = json_decode($row['bundle_config'] ?? '{}', true) ?: [];
-
-            // Update mailer settings
-            $bundleConfig['mailer_dsn'] = $newDsn;
-
-            $stmt = $pdo->prepare("UPDATE mautic_configurations SET bundle_config = ? WHERE id = 1");
-            $stmt->execute([json_encode($bundleConfig)]);
-            echo "Updated mailer_dsn in mautic_configurations\n";
-        }
-
-        echo "Database update complete\n";
-    } catch (PDOException $e) {
-        echo "Database error: " . $e->getMessage() . "\n";
-        // Non-fatal, continue with startup
-    }
+if (!file_exists($configFile)) {
+    echo "Config file not found, creating new one\n";
+    $config = [];
 } else {
-    echo "Could not parse MAILER_DSN format\n";
+    $config = include $configFile;
+    if (!is_array($config)) {
+        $config = [];
+    }
+}
+
+// Set mailer_dsn to use the environment variable value
+$config['mailer_dsn'] = $mailerDsn;
+
+// Write back the config
+$content = "<?php\nreturn " . var_export($config, true) . ";\n";
+if (file_put_contents($configFile, $content)) {
+    echo "Successfully wrote MAILER_DSN to local.php\n";
+    chmod($configFile, 0666);
+} else {
+    echo "Failed to write config file\n";
 }
 PHPSCRIPT
 
-# Create custom entrypoint that injects MAILER_DSN and clears cache on startup
+# Create custom entrypoint that injects MAILER_DSN into config file
 RUN cat > /usr/local/bin/mautic-entrypoint.sh << 'ENTRYPOINT'
 #!/bin/bash
-echo "=== Mautic with SES API Transport (v9) ==="
+echo "=== Mautic with SES API Transport (v10) ==="
 
-# Update MAILER_DSN in database from environment variable
-echo "Updating MAILER_DSN in database..."
-php /usr/local/bin/update-mailer-dsn.php
-
-# Make config directory writable
+# Make config directory writable FIRST
+mkdir -p /var/www/html/config
 chmod -R 777 /var/www/html/config 2>/dev/null || true
+touch /var/www/html/config/local.php 2>/dev/null || true
+chmod 666 /var/www/html/config/local.php 2>/dev/null || true
 chown -R www-data:www-data /var/www/html/config
 
-echo "Clearing cache to pick up fresh configuration..."
+# Inject MAILER_DSN into local.php config file
+echo "Injecting MAILER_DSN into config..."
+php /usr/local/bin/inject-mailer-dsn.php
 
-# ALWAYS clear cache on startup
+# Clear cache to pick up new config
+echo "Clearing cache..."
 rm -rf /var/www/html/var/cache/prod/* 2>/dev/null || true
 chown -R www-data:www-data /var/www/html/var/cache
 
 echo "Warming up cache..."
 su -s /bin/bash www-data -c "php /var/www/html/bin/console cache:clear --env=prod --no-warmup" 2>/dev/null || true
 su -s /bin/bash www-data -c "php /var/www/html/bin/console cache:warmup --env=prod" 2>/dev/null || true
-echo "Cache rebuilt with MAILER_DSN from environment"
+echo "Cache rebuilt with MAILER_DSN: $(echo $MAILER_DSN | sed 's/:.*@/:***@/')"
 
 exec /docker-entrypoint.sh "$@"
 ENTRYPOINT
 
 RUN chmod +x /usr/local/bin/mautic-entrypoint.sh && \
-    chmod +x /usr/local/bin/update-mailer-dsn.php
+    chmod +x /usr/local/bin/inject-mailer-dsn.php
 
 ENTRYPOINT ["/usr/local/bin/mautic-entrypoint.sh"]
 CMD ["apache2-foreground"]
