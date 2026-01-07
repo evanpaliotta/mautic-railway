@@ -57,13 +57,12 @@ RUN echo '#!/bin/bash' > /usr/local/bin/mautic-start.sh && \
     echo 'exec apache2-foreground' >> /usr/local/bin/mautic-start.sh && \
     chmod +x /usr/local/bin/mautic-start.sh
 
-# Verify packages are installed (build-time check)
-RUN php -r "require '/var/www/html/vendor/autoload.php'; echo 'Autoload OK\n'; \
-    if (class_exists('Symfony\Component\Mailer\Bridge\Amazon\Transport\SesTransportFactory')) { \
-        echo 'SES Transport Factory: FOUND\n'; \
+# Verify packages are installed (build-time check using a script)
+RUN echo '<?php require "/var/www/html/vendor/autoload.php"; \
+    if (class_exists("Symfony\\Component\\Mailer\\Bridge\\Amazon\\Transport\\SesTransportFactory")) { \
+        echo "SES Transport Factory: FOUND\n"; exit(0); \
     } else { \
-        echo 'SES Transport Factory: NOT FOUND - this is a problem\n'; \
-        exit 1; \
-    }"
+        echo "SES Transport Factory: NOT FOUND\n"; exit(1); \
+    }' > /tmp/check.php && php /tmp/check.php && rm /tmp/check.php
 
 CMD ["/usr/local/bin/mautic-start.sh"]
