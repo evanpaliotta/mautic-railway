@@ -1,10 +1,10 @@
 # Custom Mautic Dockerfile with SES API mailer support
 # Fixes: Railway blocks SMTP ports, must use API-based email transport
-# Build: 2026-01-06-v7 - ALWAYS clear cache on startup to pick up env vars (MAILER_DSN)
+# Build: 2026-01-06-v8 - Make config writable + clear cache on startup
 FROM mautic/mautic:5-apache
 
 # Cache-busting build arg to force fresh layers when needed
-ARG CACHE_BUST=2026-01-06-v7-new-creds
+ARG CACHE_BUST=2026-01-06-v8-writable-config
 
 # Fix the Apache MPM configuration error
 RUN a2dismod mpm_event 2>/dev/null || true && \
@@ -100,11 +100,18 @@ RUN php -r 'require "/var/www/html/vendor/autoload.php"; \
 RUN echo "Checking container for mailer transports..." && \
     php /var/www/html/bin/console debug:container --tag=mailer.transport_factory --env=prod 2>&1 | head -20 || echo "Could not check container"
 
-# Create custom entrypoint that ALWAYS clears and rebuilds cache on startup
-# This ensures environment variables (MAILER_DSN) are picked up fresh
+# Create custom entrypoint that makes config writable and clears cache on startup
 RUN cat > /usr/local/bin/mautic-entrypoint.sh << 'ENTRYPOINT'
 #!/bin/bash
-echo "=== Mautic with SES API Transport (v7) ==="
+echo "=== Mautic with SES API Transport (v8) ==="
+
+# Make config directory fully writable so UI can save changes
+echo "Making config directory writable..."
+chmod -R 777 /var/www/html/config 2>/dev/null || true
+touch /var/www/html/config/local.php 2>/dev/null || true
+chmod 666 /var/www/html/config/local.php 2>/dev/null || true
+chown -R www-data:www-data /var/www/html/config
+
 echo "Clearing cache to pick up fresh environment variables..."
 
 # ALWAYS clear cache on startup to ensure env vars are fresh
@@ -114,7 +121,7 @@ chown -R www-data:www-data /var/www/html/var/cache
 echo "Warming up cache..."
 su -s /bin/bash www-data -c "php /var/www/html/bin/console cache:clear --env=prod --no-warmup" 2>/dev/null || true
 su -s /bin/bash www-data -c "php /var/www/html/bin/console cache:warmup --env=prod" 2>/dev/null || true
-echo "Cache rebuilt with current MAILER_DSN"
+echo "Cache rebuilt - config writable - MAILER_DSN active"
 
 exec /docker-entrypoint.sh "$@"
 ENTRYPOINT
