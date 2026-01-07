@@ -1,13 +1,10 @@
 # Custom Mautic Dockerfile with SES API mailer support
 # Fixes: Railway blocks SMTP ports, must use API-based email transport
-# Build: 2026-01-06-v13 - Fix transport factory registration
+# Build: 2026-01-06-v14 - Clear cache at startup to use MAILER_DSN env var
 FROM mautic/mautic:5-apache
 
-# Cache-busting build arg to force fresh layers when needed
-ARG CACHE_BUST=2026-01-06-v13-fix-transport
-
-# Build-time argument for MAILER_DSN
-ARG MAILER_DSN_BUILD="ses+api://AKIATQN6XWF5FFHZFGN4:iGgjtUac0E6Q%2FLlh1jDKeu3iwBAmHEw8gyytjTEH@default?region=us-east-2"
+# Cache-busting build arg
+ARG CACHE_BUST=2026-01-06-v14-use-env-var
 
 # Fix the Apache MPM configuration error
 RUN a2dismod mpm_event 2>/dev/null || true && \
@@ -58,8 +55,7 @@ RUN composer dump-autoload --optimize --classmap-authoritative && \
 # Switch back to root for config changes
 USER root
 
-# CRITICAL: Create the mailer transport config in the correct location
-# Mautic uses Symfony's config loading, so we put it in config/packages/
+# Create the mailer transport config
 RUN mkdir -p /var/www/html/config/packages && \
     cat > /var/www/html/config/packages/mailer_transports.yaml << 'YAMLCONFIG'
 # Custom mailer transport factories for AWS SES API
@@ -77,80 +73,64 @@ services:
             - { name: mailer.transport_factory }
 YAMLCONFIG
 
-RUN chown www-data:www-data /var/www/html/config/packages/mailer_transports.yaml && \
-    echo "Created mailer_transports.yaml" && \
-    cat /var/www/html/config/packages/mailer_transports.yaml
+RUN chown www-data:www-data /var/www/html/config/packages/mailer_transports.yaml
 
-# Also add to services.yaml to ensure it's loaded
-RUN if [ -f /var/www/html/config/services.yaml ]; then \
-    echo "" >> /var/www/html/config/services.yaml && \
-    echo "# AWS SES Transport Factory" >> /var/www/html/config/services.yaml && \
-    echo "    Symfony\\Component\\Mailer\\Bridge\\Amazon\\Transport\\SesTransportFactory:" >> /var/www/html/config/services.yaml && \
-    echo "        tags:" >> /var/www/html/config/services.yaml && \
-    echo "            - { name: mailer.transport_factory }" >> /var/www/html/config/services.yaml && \
-    echo "Added SES factory to services.yaml"; \
-    fi
+# CRITICAL: Remove any hardcoded mailer_dsn from local.php
+# This forces Mautic to use the MAILER_DSN environment variable
+RUN if [ -f /var/www/html/config/local.php ]; then \
+    echo "Removing mailer_dsn from local.php to use env var..." && \
+    php -r " \
+        \$config = include '/var/www/html/config/local.php'; \
+        unset(\$config['mailer_dsn']); \
+        file_put_contents('/var/www/html/config/local.php', '<?php return ' . var_export(\$config, true) . ';'); \
+        echo 'Removed mailer_dsn from local.php\n'; \
+    "; \
+    fi && \
+    chown www-data:www-data /var/www/html/config/local.php
 
 # Set proper ownership
 RUN chown -R www-data:www-data /var/www/html/config && \
     chown -R www-data:www-data /var/www/html/var && \
     chown -R www-data:www-data /var/www/html/vendor
 
-# Inject MAILER_DSN into local.php at BUILD TIME
-ARG MAILER_DSN_BUILD
-RUN echo "Injecting MAILER_DSN into local.php at build time..." && \
-    if [ -f /var/www/html/config/local.php ]; then \
-        php -r " \
-            \$config = include '/var/www/html/config/local.php'; \
-            \$config['mailer_dsn'] = '${MAILER_DSN_BUILD}'; \
-            file_put_contents('/var/www/html/config/local.php', '<?php return ' . var_export(\$config, true) . ';'); \
-            echo 'Updated local.php with new mailer_dsn\n'; \
-        "; \
-    else \
-        echo '<?php return array("mailer_dsn" => "'${MAILER_DSN_BUILD}'");' > /var/www/html/config/local.php; \
-        echo 'Created new local.php with mailer_dsn'; \
-    fi && \
-    chown www-data:www-data /var/www/html/config/local.php && \
-    echo "=== local.php contents ===" && \
-    cat /var/www/html/config/local.php
-
-# Clear cache and rebuild container as www-data
+# Clear cache during build
 USER www-data
-
-# Force complete cache rebuild with transport factory
 RUN rm -rf /var/www/html/var/cache/* && \
-    echo "Cache cleared, rebuilding with transport factories..." && \
-    php /var/www/html/bin/console cache:clear --env=prod --no-warmup 2>&1 || echo "Cache clear done" && \
-    php /var/www/html/bin/console cache:warmup --env=prod 2>&1 || echo "Cache warmup done"
+    php /var/www/html/bin/console cache:clear --env=prod --no-warmup 2>&1 || echo "Cache clear done"
 
-# Switch back to root for verification
 USER root
 
-# Verify packages are installed (build-time check)
+# Verify packages are installed
 RUN php -r 'require "/var/www/html/vendor/autoload.php"; \
     $found = class_exists("Symfony\\Component\\Mailer\\Bridge\\Amazon\\Transport\\SesTransportFactory"); \
     echo $found ? "SES Transport Factory: FOUND\n" : "SES Transport Factory: NOT FOUND\n"; \
     exit($found ? 0 : 1);'
 
-# Check if transport is registered in container
-RUN echo "=== Checking container for mailer transports ===" && \
-    php /var/www/html/bin/console debug:container --tag=mailer.transport_factory --env=prod 2>&1 || echo "Container check completed"
-
-# List all available mailer transports
-RUN echo "=== Listing all transports ===" && \
-    php /var/www/html/bin/console debug:container mailer --env=prod 2>&1 | head -30 || echo "Mailer services listed"
-
-# Create custom entrypoint - DO NOT clear cache (preserve build-time cache)
+# Create custom entrypoint that clears cache on startup to pick up MAILER_DSN env var
 RUN cat > /usr/local/bin/mautic-entrypoint.sh << 'ENTRYPOINT'
 #!/bin/bash
-echo "=== Mautic with SES API Transport (v13) ==="
-echo "Transport factories registered at build time"
-echo "NOT clearing cache to preserve transport registration"
+echo "=== Mautic with SES API Transport (v14) ==="
+echo "Using MAILER_DSN from environment variable"
 
-# Only ensure cache directory is writable, don't clear it
-chown -R www-data:www-data /var/www/html/var/cache 2>/dev/null || true
+# Show MAILER_DSN (masked) for debugging
+if [ -n "$MAILER_DSN" ]; then
+    echo "MAILER_DSN is set (value masked for security)"
+    echo "DSN scheme: $(echo $MAILER_DSN | cut -d':' -f1)"
+else
+    echo "WARNING: MAILER_DSN is not set!"
+fi
 
-# Debug: Check if SES transport is available
+# CRITICAL: Clear all caches on startup to pick up environment variables
+echo "Clearing caches to pick up environment variables..."
+rm -rf /var/www/html/var/cache/* 2>/dev/null || true
+chown -R www-data:www-data /var/www/html/var/cache
+
+# Warm up cache with current environment
+echo "Warming up cache with current environment..."
+su -s /bin/bash www-data -c "php /var/www/html/bin/console cache:clear --env=prod --no-warmup" 2>/dev/null || true
+su -s /bin/bash www-data -c "php /var/www/html/bin/console cache:warmup --env=prod" 2>/dev/null || true
+
+# Check if SES transport is available
 echo "Checking SES transport availability..."
 su -s /bin/bash www-data -c "php /var/www/html/bin/console debug:container --tag=mailer.transport_factory --env=prod 2>&1 | head -10" || echo "Could not check transports"
 
