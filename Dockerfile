@@ -1,10 +1,10 @@
 # Custom Mautic Dockerfile with SES API mailer support
 # Fixes: Railway blocks SMTP ports, must use API-based email transport
-# Build: 2026-01-07-v17 - Fix build failure when local.php doesn't exist
+# Build: 2026-01-28-v18 - Wrapper for apache2-foreground to inject MAILER_DSN
 FROM mautic/mautic:5-apache
 
 # Cache-busting build arg
-ARG CACHE_BUST=2026-01-06-v16-force-local-php
+ARG CACHE_BUST=2026-01-28-v18-apache-wrapper
 
 # Fix the Apache MPM configuration error
 RUN a2dismod mpm_event 2>/dev/null || true && \
@@ -207,6 +207,45 @@ exec /docker-entrypoint.sh "$@"
 ENTRYPOINT
 
 RUN chmod +x /usr/local/bin/mautic-entrypoint.sh
+
+# Create wrapper for apache2-foreground that ALWAYS injects MAILER_DSN
+# This works even when Railway's startCommand bypasses the ENTRYPOINT
+RUN mv /usr/local/bin/apache2-foreground /usr/local/bin/apache2-foreground-original 2>/dev/null || true && \
+    cat > /usr/local/bin/apache2-foreground << 'WRAPPER'
+#!/bin/bash
+# v18: Wrapper that injects MAILER_DSN before starting Apache
+# This ensures SES API config is used even when Railway bypasses ENTRYPOINT
+
+LOCAL_PHP="/var/www/html/config/local.php"
+
+if [ -n "$MAILER_DSN" ] && [ -f "$LOCAL_PHP" ]; then
+    echo "[v18] Injecting MAILER_DSN into local.php..."
+
+    # Use PHP to safely update the config
+    php -r "
+        \$config = include '$LOCAL_PHP';
+        if (!is_array(\$config)) \$config = [];
+        \$config['mailer_dsn'] = getenv('MAILER_DSN');
+        \$content = '<?php return ' . var_export(\$config, true) . ';';
+        file_put_contents('$LOCAL_PHP', \$content);
+        echo '[v18] MAILER_DSN injected: ' . substr(getenv('MAILER_DSN'), 0, 20) . '...' . PHP_EOL;
+    "
+
+    # Clear Symfony cache
+    rm -rf /var/www/html/var/cache/* 2>/dev/null || true
+    echo "[v18] Cache cleared"
+fi
+
+# Call the original apache2-foreground (or docker-php-entrypoint)
+if [ -x /usr/local/bin/apache2-foreground-original ]; then
+    exec /usr/local/bin/apache2-foreground-original "$@"
+else
+    # Fallback: use docker-php-entrypoint with apache2-foreground
+    exec docker-php-entrypoint apache2 -DFOREGROUND "$@"
+fi
+WRAPPER
+
+RUN chmod +x /usr/local/bin/apache2-foreground
 
 ENTRYPOINT ["/usr/local/bin/mautic-entrypoint.sh"]
 CMD ["apache2-foreground"]
